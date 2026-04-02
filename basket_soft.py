@@ -1,5 +1,5 @@
 """
-basket.py — Backtesting EN VIVO de Divergencia Armónica ETH/SOL/BTC
+basket.py — Backtesting EN VIVO de Divergencia Armónica ETH/SOL/BTC/XRP
 Lee precios REALES del order book de Polymarket — SIN ejecutar órdenes reales.
 
 LOGICA BINARIA CORRECTA:
@@ -7,11 +7,10 @@ LOGICA BINARIA CORRECTA:
   Cada entrada cuesta exactamente $1.00 (el 1% del capital de $100).
   Shares comprados = $1.00 / precio_ask
 
-v6: Entrada en los 3 activos simultáneamente cuando se detecta el armónico.
-  - bt["position"] → bt["positions"] (lista de hasta 3 posiciones)
-  - Capital descontado = ENTRY_USD * 3 por ciclo
-  - Side de cada activo: el que tenga mayor divergencia (señal global) aplica
-    a todos. Cada activo entra por el side del armónico detectado.
+v7: XRP agregado como cuarto activo. Stop loss eliminado — resuelve solo.
+  - SYMBOLS: ETH, SOL, BTC, XRP
+  - Costo por ciclo: ENTRY_USD * 4
+  - Las posiciones cierran únicamente por resolución del mercado.
 """
 
 import asyncio
@@ -63,7 +62,6 @@ CONSENSUS_FULL       = 0.80
 CONSENSUS_SOFT       = 0.80
 
 ENTRY_MIN_PRICE      = 0.65
-STOP_LOSS_PRICE      = 0.33
 MID_HISTORY_SIZE     = 3
 
 LOG_FILE   = os.environ.get("LOG_FILE",   "/data/basket_log.json")
@@ -73,7 +71,7 @@ STATE_FILE = os.environ.get("STATE_FILE", "/data/state.json")
 # ═══════════════════════════════════════════════════════
 #  ESTADO
 # ═══════════════════════════════════════════════════════
-SYMBOLS = ["ETH", "SOL", "BTC"]
+SYMBOLS = ["ETH", "SOL", "BTC", "XRP"]
 
 markets = {
     s: {
@@ -97,7 +95,7 @@ bt = {
     "signal_side":  None,
     "signal_div":   0.0,
     "entry_window": False,
-    "positions":    [],          # ← LISTA de posiciones (máx 3)
+    "positions":    [],
     "traded_this_cycle": False,
     "capital":      CAPITAL_TOTAL,
     "total_pnl":    0.0,
@@ -122,7 +120,8 @@ CSV_COLUMNS = [
     "secs_left_entry", "harm_entry", "gap_pts",
     "peer1_sym", "peer1_side_mid", "peer1_opp_mid",
     "peer2_sym", "peer2_side_mid", "peer2_opp_mid",
-    "sl_price", "exit_type", "exit_price", "resolved", "binary_win",
+    "peer3_sym", "peer3_side_mid", "peer3_opp_mid",
+    "exit_type", "exit_price", "resolved", "binary_win",
     "pnl_usd", "pnl_pct_entry", "max_possible_win", "outcome",
     "capital_before", "capital_after", "cumulative_pnl", "trade_number",
 ]
@@ -231,7 +230,7 @@ def write_state():
         "signal_asset": bt["signal_asset"],
         "signal_side": bt["signal_side"],
         "signal_div": round(bt["signal_div"], 4),
-        "positions": bt["positions"],          # ← lista completa
+        "positions": bt["positions"],
         "pending_resolution": None,
         "markets": {
             sym: {
@@ -422,7 +421,7 @@ def compute_signals():
         else:
             peer_vals = [markets[p]["dn_mid"] for p in peers if markets[p]["dn_mid"] > 0]
 
-        if len(peer_vals) == 2 and all(v > CONSENSUS_FULL for v in peer_vals):
+        if len(peer_vals) >= 3 and all(v > CONSENSUS_FULL for v in peer_vals):
             bt["consensus"] = "FULL"
         elif len(peer_vals) >= 1 and sum(1 for v in peer_vals if v > CONSENSUS_SOFT) >= 1:
             bt["consensus"] = "SOFT"
@@ -489,7 +488,7 @@ def _build_single_position(sym: str, side: str, secs: float,
 
 def check_entry():
     """
-    Abre posición en los 3 activos simultáneamente cuando se detecta
+    Abre posición en los 4 activos simultáneamente cuando se detecta
     el armónico con consenso FULL y divergencia dentro del rango válido.
     Todos entran por el mismo side (el del armónico).
     """
@@ -518,10 +517,10 @@ def check_entry():
     gap_entry   = bt["signal_div"]
     secs        = min_secs_remaining() or 0
 
-    # Intentar abrir los 3
+    # Intentar abrir los 4
     nuevas_posiciones = []
     for sym in SYMBOLS:
-        capital_before = bt["capital"]   # se va actualizando por posición
+        capital_before = bt["capital"]
         pos = _build_single_position(sym, side, secs, harm_entry, gap_entry, capital_before)
         if pos:
             bt["capital"] -= ENTRY_USD
@@ -539,35 +538,8 @@ def check_entry():
 
     bt["positions"] = nuevas_posiciones
     bt["traded_this_cycle"] = True
-    log_event(f"BASKET ABIERTO — {len(nuevas_posiciones)}/3 posiciones en {side}")
+    log_event(f"BASKET ABIERTO — {len(nuevas_posiciones)}/4 posiciones en {side}")
     write_state()
-
-
-def check_stop_loss():
-    if not bt["positions"]:
-        return
-
-    cerradas = []
-    for pos in bt["positions"]:
-        sym  = pos["asset"]
-        side = pos["side"]
-        current_bid = markets[sym]["up_bid"] if side == "UP" else markets[sym]["dn_bid"]
-
-        if current_bid <= STOP_LOSS_PRICE and current_bid > 0:
-            pnl = round(pos["shares"] * current_bid - ENTRY_USD, 6)
-            bt["capital"]   += ENTRY_USD + pnl
-            bt["total_pnl"] += pnl
-            bt["losses"]    += 1
-            update_drawdown()
-            log_event(f"STOP LOSS {side} {sym} @ bid={current_bid:.4f} | PnL=${pnl:+.4f}")
-            _record_trade_sl(pos, current_bid, pnl)
-            cerradas.append(pos)
-
-    for pos in cerradas:
-        bt["positions"].remove(pos)
-
-    if cerradas:
-        write_state()
 
 
 def _apply_resolution(pos, resolved):
@@ -655,8 +627,8 @@ def _build_trade_record(pos, exit_type, exit_price, resolved, outcome, pnl):
 
     p1_side_mid, p1_opp_mid = peer_mids(peers[0]) if len(peers) > 0 else (0.0, 0.0)
     p2_side_mid, p2_opp_mid = peer_mids(peers[1]) if len(peers) > 1 else (0.0, 0.0)
+    p3_side_mid, p3_opp_mid = peer_mids(peers[2]) if len(peers) > 2 else (0.0, 0.0)
 
-    sl_price = STOP_LOSS_PRICE
     max_win  = round((1.0 - pos["entry_price"]) / pos["entry_price"] * pos["entry_usd"], 6)
 
     binary_win = 1 if outcome == "WIN" and exit_type == "RESOLUTION" else \
@@ -684,7 +656,9 @@ def _build_trade_record(pos, exit_type, exit_price, resolved, outcome, pnl):
         "peer2_sym":        peers[1] if len(peers) > 1 else "",
         "peer2_side_mid":   round(p2_side_mid, 6),
         "peer2_opp_mid":    round(p2_opp_mid, 6),
-        "sl_price":         sl_price,
+        "peer3_sym":        peers[2] if len(peers) > 2 else "",
+        "peer3_side_mid":   round(p3_side_mid, 6),
+        "peer3_opp_mid":    round(p3_opp_mid, 6),
         "exit_type":        exit_type,
         "exit_price":       round(exit_price, 6),
         "resolved":         resolved or "",
@@ -717,13 +691,6 @@ def _record_trade(pos, resolved, outcome, pnl):
     _save_log()
 
 
-def _record_trade_sl(pos, exit_bid, pnl):
-    record = _build_trade_record(pos, "STOP_LOSS", exit_bid, None, "LOSS", pnl)
-    bt["trades"].append(record)
-    _save_csv(record)
-    _save_log()
-
-
 def _save_log():
     total = bt["wins"] + bt["losses"]
     with open(LOG_FILE, "w") as f:
@@ -749,9 +716,10 @@ def _save_log():
 # ═══════════════════════════════════════════════════════
 
 async def main_loop():
-    log_event("basket.py iniciado — SIMULACION BINARIA v6 (basket 3 activos)")
-    log_event(f"Capital: ${CAPITAL_TOTAL:.0f} | Entrada: ${ENTRY_USD:.2f}x3 = ${ENTRY_USD*3:.2f} por ciclo")
+    log_event("basket.py iniciado — SIMULACION BINARIA v7 (basket 4 activos: ETH/SOL/BTC/XRP)")
+    log_event(f"Capital: ${CAPITAL_TOTAL:.0f} | Entrada: ${ENTRY_USD:.2f}x4 = ${ENTRY_USD*4:.2f} por ciclo")
     log_event(f"div>={DIVERGENCE_THRESHOLD:.0%} ≤{DIVERGENCE_MAX:.0%} | Ventana {ENTRY_OPEN_SECS}s–{ENTRY_WINDOW_SECS}s")
+    log_event("Sin stop loss — las posiciones resuelven solas al vencimiento.")
 
     restore_state_from_csv()
 
@@ -796,8 +764,6 @@ async def main_loop():
             )
 
             if bt["positions"]:
-                check_stop_loss()
-            if bt["positions"]:
                 check_resolution()
 
             if all(markets[s]["info"] is None for s in SYMBOLS):
@@ -841,12 +807,14 @@ def run_dashboard():
 # ═══════════════════════════════════════════════════════
 
 if __name__ == "__main__":
-    log.info("=" * 54)
-    log.info("  BASKET — DIVERGENCIA ARMONICA  [BINARIO]  v6")
-    log.info(f"  Capital: ${CAPITAL_TOTAL:.0f}  |  Entrada: ${ENTRY_USD:.2f}x3 por ciclo")
+    log.info("=" * 58)
+    log.info("  BASKET — DIVERGENCIA ARMONICA  [BINARIO]  v7")
+    log.info(f"  Activos: ETH / SOL / BTC / XRP")
+    log.info(f"  Capital: ${CAPITAL_TOTAL:.0f}  |  Entrada: ${ENTRY_USD:.2f}x4 por ciclo")
     log.info(f"  Gap: {DIVERGENCE_THRESHOLD*100:.0f}pts — {DIVERGENCE_MAX*100:.0f}pts  |  Ventana: {ENTRY_OPEN_SECS}s — {ENTRY_WINDOW_SECS}s")
+    log.info("  Sin stop loss — resuelve solo al vencimiento.")
     log.info("  SIMULACION — SIN DINERO REAL")
-    log.info("=" * 54)
+    log.info("=" * 58)
     log.info(f"State -> {STATE_FILE} | Log -> {LOG_FILE}")
 
     t = threading.Thread(target=run_dashboard, daemon=True)
