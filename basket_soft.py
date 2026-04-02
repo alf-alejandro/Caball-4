@@ -7,10 +7,10 @@ LOGICA BINARIA CORRECTA:
   Cada entrada cuesta exactamente $1.00 (el 1% del capital de $100).
   Shares comprados = $1.00 / precio_ask
 
-v7: XRP agregado como cuarto activo. Stop loss eliminado — resuelve solo.
+v7: XRP agregado como cuarto activo. Stop loss en 0.43.
   - SYMBOLS: ETH, SOL, BTC, XRP
   - Costo por ciclo: ENTRY_USD * 4
-  - Las posiciones cierran únicamente por resolución del mercado.
+  - Las posiciones cierran por resolución del mercado o por stop loss.
 """
 
 import asyncio
@@ -62,6 +62,7 @@ CONSENSUS_FULL       = 0.80
 CONSENSUS_SOFT       = 0.80
 
 ENTRY_MIN_PRICE      = 0.65
+STOP_LOSS_PRICE      = 0.43
 MID_HISTORY_SIZE     = 3
 
 LOG_FILE   = os.environ.get("LOG_FILE",   "/data/basket_log.json")
@@ -572,6 +573,23 @@ def check_resolution():
         sym    = pos["asset"]
         up_mid = markets[sym]["up_mid"]
 
+        # ── STOP LOSS ──────────────────────────────────────────────
+        entry_side    = pos["side"]
+        current_price = markets[sym]["up_mid"] if entry_side == "UP" else markets[sym]["dn_mid"]
+        if 0 < current_price <= STOP_LOSS_PRICE:
+            log_event(
+                f"STOP LOSS {entry_side} {sym} — precio={current_price:.4f} ≤ {STOP_LOSS_PRICE}"
+            )
+            pnl = -ENTRY_USD
+            bt["capital"]   += ENTRY_USD + pnl
+            bt["total_pnl"] += pnl
+            bt["losses"]    += 1
+            update_drawdown()
+            _record_trade(pos, "STOP_LOSS", "LOSS", pnl, exit_type="STOP_LOSS")
+            cerradas.append(pos)
+            continue
+        # ───────────────────────────────────────────────────────────
+
         resolved = None
         if up_mid >= RESOLVED_UP_THRESH:
             resolved = "UP"
@@ -632,7 +650,7 @@ def _build_trade_record(pos, exit_type, exit_price, resolved, outcome, pnl):
     max_win  = round((1.0 - pos["entry_price"]) / pos["entry_price"] * pos["entry_usd"], 6)
 
     binary_win = 1 if outcome == "WIN" and exit_type == "RESOLUTION" else \
-                 0 if outcome == "LOSS" and exit_type == "RESOLUTION" else -1
+                 0 if outcome == "LOSS" and exit_type in ("RESOLUTION", "STOP_LOSS") else -1
 
     return {
         "trade_id":         f"T{trade_number:04d}",
@@ -683,9 +701,12 @@ def _save_csv(record: dict):
         writer.writerow(record)
 
 
-def _record_trade(pos, resolved, outcome, pnl):
-    exit_price = 1.0 if resolved == pos["side"] else 0.0
-    record = _build_trade_record(pos, "RESOLUTION", exit_price, resolved, outcome, pnl)
+def _record_trade(pos, resolved, outcome, pnl, exit_type="RESOLUTION"):
+    if exit_type == "STOP_LOSS":
+        exit_price = STOP_LOSS_PRICE
+    else:
+        exit_price = 1.0 if resolved == pos["side"] else 0.0
+    record = _build_trade_record(pos, exit_type, exit_price, resolved, outcome, pnl)
     bt["trades"].append(record)
     _save_csv(record)
     _save_log()
@@ -719,7 +740,7 @@ async def main_loop():
     log_event("basket.py iniciado — SIMULACION BINARIA v7 (basket 4 activos: ETH/SOL/BTC/XRP)")
     log_event(f"Capital: ${CAPITAL_TOTAL:.0f} | Entrada: ${ENTRY_USD:.2f}x4 = ${ENTRY_USD*4:.2f} por ciclo")
     log_event(f"div>={DIVERGENCE_THRESHOLD:.0%} ≤{DIVERGENCE_MAX:.0%} | Ventana {ENTRY_OPEN_SECS}s–{ENTRY_WINDOW_SECS}s")
-    log_event("Sin stop loss — las posiciones resuelven solas al vencimiento.")
+    log_event(f"Stop loss activado en precio ≤ {STOP_LOSS_PRICE}")
 
     restore_state_from_csv()
 
@@ -812,7 +833,7 @@ if __name__ == "__main__":
     log.info(f"  Activos: ETH / SOL / BTC / XRP")
     log.info(f"  Capital: ${CAPITAL_TOTAL:.0f}  |  Entrada: ${ENTRY_USD:.2f}x4 por ciclo")
     log.info(f"  Gap: {DIVERGENCE_THRESHOLD*100:.0f}pts — {DIVERGENCE_MAX*100:.0f}pts  |  Ventana: {ENTRY_OPEN_SECS}s — {ENTRY_WINDOW_SECS}s")
-    log.info("  Sin stop loss — resuelve solo al vencimiento.")
+    log.info(f"  Stop loss: precio ≤ {STOP_LOSS_PRICE}")
     log.info("  SIMULACION — SIN DINERO REAL")
     log.info("=" * 58)
     log.info(f"State -> {STATE_FILE} | Log -> {LOG_FILE}")
