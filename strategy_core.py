@@ -5,6 +5,7 @@ Configurable via env vars:
   SYMBOL = SOL | BTC   (default: SOL)
 
 v2: agrega find_active_market(symbol) para soportar ETH, SOL y BTC simultaneamente.
+v3: agrega XRP.
 """
 
 import os
@@ -24,11 +25,12 @@ SYMBOL      = os.environ.get("SYMBOL", "SOL").upper()
 SLUG_PREFIX = "btc-updown-5m" if SYMBOL == "BTC" else "sol-updown-5m"
 MARKET_NAME = "Bitcoin" if SYMBOL == "BTC" else "Solana"
 
-# Mapa de slugs para los 3 activos
+# Mapa de slugs para los 4 activos
 SLUG_PREFIXES = {
     "SOL": "sol-updown-5m",
     "BTC": "btc-updown-5m",
     "ETH": "eth-updown-5m",
+    "XRP": "xrp-updown-5m",
 }
 
 
@@ -97,14 +99,14 @@ def _order_book_live(token_id: str) -> bool:
 
 def find_active_market(symbol: str) -> dict | None:
     """
-    Busca el mercado UP/DOWN 5m activo para el simbolo dado (SOL, BTC, ETH).
+    Busca el mercado UP/DOWN 5m activo para el simbolo dado (SOL, BTC, ETH, XRP).
     Estrategia robusta: en vez de depender del SLOT_ORIGIN fijo, genera todos
     los slots posibles alineados a multiplos de SLOT_STEP en la ultima hora.
     Esto funciona aunque el origen cambie con el tiempo.
     """
     slug_prefix = SLUG_PREFIXES.get(symbol.upper())
     if not slug_prefix:
-        raise ValueError(f"Simbolo no soportado: {symbol}. Usa SOL, BTC o ETH.")
+        raise ValueError(f"Simbolo no soportado: {symbol}. Usa SOL, BTC, ETH o XRP.")
 
     now  = int(time.time())
     # Base alineada al multiplo de 300 mas cercano hacia abajo
