@@ -279,7 +279,7 @@ tbody tr.r-loss { border-left: 1px solid rgba(255,45,85,0.4); }
 <header>
   <div>
     <div class="logo">BASKET // <em>LIVE</em></div>
-    <div class="logo-sub">ETH · SOL · BTC &mdash; Polymarket 5m Binary</div>
+    <div class="logo-sub">ETH &middot; SOL &middot; BTC &middot; XRP &mdash; Polymarket 5m Binary</div>
   </div>
   <div class="header-right">
     <span id="ts">––:––:––</span>
@@ -539,7 +539,7 @@ function updateMarkets(s) {
   const body = document.getElementById('mkt-body');
   if (!s.markets) { body.innerHTML='<div class="d" style="font-size:10px">Sin datos</div>'; return; }
   let html = '';
-  ['ETH','SOL','BTC'].forEach(sym => {
+  ['ETH','SOL','BTC','XRP'].forEach(sym => {
     const m = s.markets[sym]; if (!m) return;
     const isSig = sym===s.signal_asset;
     if (m.up_mid > 0) {
