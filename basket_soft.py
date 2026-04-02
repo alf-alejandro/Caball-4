@@ -11,6 +11,12 @@ v7: XRP agregado como cuarto activo. Stop loss en 0.43.
   - SYMBOLS: ETH, SOL, BTC, XRP
   - Costo por ciclo: ENTRY_USD * 4
   - Las posiciones cierran por resolución del mercado o por stop loss.
+
+FIX v7.1: Stop loss corregido.
+  - up_mid se calcula una sola vez por posición para consistencia.
+  - Se agrega check already_resolved para no disparar SL cuando el mercado
+    ya está en zona de resolución (>=0.98 o <=0.02).
+  - Evita falsos SL por precios 0.0 de fetches fallidos.
 """
 
 import asyncio
@@ -570,15 +576,30 @@ def check_resolution():
 
     cerradas = []
     for pos in bt["positions"]:
-        sym    = pos["asset"]
+        sym        = pos["asset"]
+        entry_side = pos["side"]
+
+        # Leer precios una sola vez para consistencia en todo el bloque
         up_mid = markets[sym]["up_mid"]
+        dn_mid = markets[sym]["dn_mid"]
 
         # ── STOP LOSS ──────────────────────────────────────────────
-        entry_side    = pos["side"]
-        current_price = markets[sym]["up_mid"] if entry_side == "UP" else markets[sym]["dn_mid"]
-        if 0 < current_price <= STOP_LOSS_PRICE:
+        # Precio de seguimiento según el lado de la posición
+        current_price = up_mid if entry_side == "UP" else dn_mid
+
+        # Solo disparar si:
+        #   1. El precio es válido (> 0, no un fetch fallido)
+        #   2. El mercado NO está ya en zona de resolución (evita
+        #      disparar SL cuando ya va a resolver como WIN)
+        already_resolved = (
+            up_mid >= RESOLVED_UP_THRESH or
+            up_mid <= RESOLVED_DN_THRESH
+        )
+
+        if not already_resolved and 0 < current_price <= STOP_LOSS_PRICE:
             log_event(
-                f"STOP LOSS {entry_side} {sym} — precio={current_price:.4f} ≤ {STOP_LOSS_PRICE}"
+                f"STOP LOSS {entry_side} {sym} — "
+                f"precio={current_price:.4f} ≤ {STOP_LOSS_PRICE}"
             )
             pnl = -ENTRY_USD
             bt["capital"]   += ENTRY_USD + pnl
@@ -590,6 +611,7 @@ def check_resolution():
             continue
         # ───────────────────────────────────────────────────────────
 
+        # ── RESOLUCIÓN NORMAL ──────────────────────────────────────
         resolved = None
         if up_mid >= RESOLVED_UP_THRESH:
             resolved = "UP"
@@ -600,8 +622,9 @@ def check_resolution():
             _apply_resolution(pos, resolved)
             cerradas.append(pos)
             continue
+        # ───────────────────────────────────────────────────────────
 
-        # Mercado expirado sin precio concluyente → fallback CLOB
+        # ── FALLBACK: mercado expirado sin precio concluyente ──────
         if markets[sym]["info"] is None:
             resolved = resolve_from_clob_history(sym)
             if resolved == "_UNKNOWN":
@@ -615,6 +638,7 @@ def check_resolution():
             else:
                 _apply_resolution(pos, resolved)
             cerradas.append(pos)
+        # ───────────────────────────────────────────────────────────
 
     for pos in cerradas:
         bt["positions"].remove(pos)
@@ -737,7 +761,7 @@ def _save_log():
 # ═══════════════════════════════════════════════════════
 
 async def main_loop():
-    log_event("basket.py iniciado — SIMULACION BINARIA v7 (basket 4 activos: ETH/SOL/BTC/XRP)")
+    log_event("basket.py iniciado — SIMULACION BINARIA v7.1 (basket 4 activos: ETH/SOL/BTC/XRP)")
     log_event(f"Capital: ${CAPITAL_TOTAL:.0f} | Entrada: ${ENTRY_USD:.2f}x4 = ${ENTRY_USD*4:.2f} por ciclo")
     log_event(f"div>={DIVERGENCE_THRESHOLD:.0%} ≤{DIVERGENCE_MAX:.0%} | Ventana {ENTRY_OPEN_SECS}s–{ENTRY_WINDOW_SECS}s")
     log_event(f"Stop loss activado en precio ≤ {STOP_LOSS_PRICE}")
@@ -829,7 +853,7 @@ def run_dashboard():
 
 if __name__ == "__main__":
     log.info("=" * 58)
-    log.info("  BASKET — DIVERGENCIA ARMONICA  [BINARIO]  v7")
+    log.info("  BASKET — DIVERGENCIA ARMONICA  [BINARIO]  v7.1")
     log.info(f"  Activos: ETH / SOL / BTC / XRP")
     log.info(f"  Capital: ${CAPITAL_TOTAL:.0f}  |  Entrada: ${ENTRY_USD:.2f}x4 por ciclo")
     log.info(f"  Gap: {DIVERGENCE_THRESHOLD*100:.0f}pts — {DIVERGENCE_MAX*100:.0f}pts  |  Ventana: {ENTRY_OPEN_SECS}s — {ENTRY_WINDOW_SECS}s")
